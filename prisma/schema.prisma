@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            String    @id @default(cuid())
+  firebaseUid   String    @unique
+  email         String    @unique
+  name          String?
+  phone         String?
+  apiKey        String    @unique @default(cuid())
+  profile       Profile?
+  resumes       Resume[]
+  applications  Application[]
+  reminders     Reminder[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Profile {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id])
+  skills      String[]
+  experience  Json     // [{ title, company, startDate, endDate, description }]
+  education   Json     // [{ degree, institution, year }]
+  preferences Json?    // { jobTitles: [], locations: [], remote: boolean }
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Resume {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  originalUrl String
+  parsedData  Json?
+  isMaster    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+model Job {
+  id           String        @id @default(cuid())
+  externalId   String?       @unique
+  title        String
+  company      String
+  location     String?
+  description  String        @db.Text
+  url          String
+  source       String
+  postedAt     DateTime?
+  applications Application[]
+  reminders    Reminder[]
+  createdAt    DateTime      @default(now())
+}
+
+model Application {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  jobId       String
+  job         Job      @relation(fields: [jobId], references: [id])
+  status      String   // "applied", "followup", "rejected", "interview"
+  appliedAt   DateTime @default(now())
+  reminderId  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Reminder {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  jobId       String?
+  job         Job?     @relation(fields: [jobId], references: [id])
+  type        String   // "followup", "deadline", "general"
+  scheduledAt DateTime
+  sent        Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}

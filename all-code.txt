@@ -1,0 +1,2131 @@
+﻿
+==== route.ts ====
+
+import { NextRequest, NextResponse } from "next/server"
+import { adminAuth } from "@/lib/firebase/admin"
+import { prisma } from "@/lib/prisma"
+import { randomBytes } from "crypto"
+
+export async function POST(req: NextRequest) {
+  const token = req.headers.get("Authorization")?.split(" ")[1]
+  if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  try {
+    const decoded = await adminAuth.verifyIdToken(token)
+
+    let user = await prisma.user.findUnique({ where: { firebaseUid: decoded.uid } })
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          firebaseUid: decoded.uid,
+          email: decoded.email!,
+          name: decoded.name || null,
+          apiKey: randomBytes(32).toString("hex"),
+        },
+      })
+    }
+
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    console.error(error)
+    return NextResponse.json({ error: "Invalid token" }, { status: 401 })
+  }
+}
+
+==== route.ts ====
+
+import { NextRequest, NextResponse } from "next/server"
+import { prisma } from "@/lib/prisma" 
+export async function POST(req: NextRequest) {
+  const apiKey = req.headers.get("x-api-key")
+  if (!apiKey) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  const user = await prisma.user.findUnique({ where: { apiKey } })
+  if (!user) return NextResponse.json({ error: "Invalid key" }, { status: 401 })
+
+  const { jobId, status } = await req.json()
+
+  const application = await prisma.application.create({
+    data: {
+      userId: user.id,
+      jobId,
+      status,
+    },
+  })
+
+  return NextResponse.json(application)
+}
+
+==== route.ts ====
+
+import { NextRequest, NextResponse } from "next/server"
+import { prisma } from "@/lib/prisma" 
+import { callGemini } from "@/lib/ai/gemini"
+
+export async function POST(req: NextRequest) {
+  const apiKey = req.headers.get("x-api-key")
+  if (!apiKey) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  const user = await prisma.user.findUnique({ where: { apiKey } })
+  if (!user) return NextResponse.json({ error: "Invalid key" }, { status: 401 })
+
+  const { jobDescription, profile } = await req.json()
+
+  const prompt = `
+Given the following job description and candidate profile, rewrite the candidate's experience and skills to create a tailored resume that highlights the most relevant qualifications for this job. Return only the resume text in a clean, professional format.
+
+Job Description:
+${jobDescription}
+
+Candidate Profile:
+Name: ${profile.name}
+Email: ${profile.email}
+Skills: ${profile.skills?.join(', ')}
+Experience: ${JSON.stringify(profile.experience)}
+Education: ${JSON.stringify(profile.education)}
+
+Tailored Resume:
+  `
+
+  const tailored = await callGemini(prompt)
+  return NextResponse.json({ tailoredResumeText: tailored })
+}
+
+==== route.ts ====
+
+
+==== route.ts ====
+
+import { NextRequest, NextResponse } from "next/server"
+import { prisma } from "@/lib/prisma"
+
+export async function GET(req: NextRequest) {
+  const apiKey = req.headers.get("x-api-key")
+  if (!apiKey) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  const user = await prisma.user.findUnique({ where: { apiKey } })
+  if (!user) return NextResponse.json({ error: "Invalid key" }, { status: 401 })
+
+  const profile = await prisma.profile.findUnique({ where: { userId: user.id } })
+  const masterResume = await prisma.resume.findFirst({ where: { userId: user.id, isMaster: true } })
+
+  return NextResponse.json({
+    profile,
+    resumeUrl: masterResume?.originalUrl,
+  })
+}
+
+==== route.ts ====
+
+import { NextRequest, NextResponse } from "next/server"
+import { redis } from "@/lib/redis"
+import { scrapeJobs } from "@/lib/scraper/jobs"
+
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url)
+  const query = searchParams.get("q") || ""
+  const location = searchParams.get("location") || ""
+
+  const cacheKey = `jobs:${query}:${location}`
+  const cached = await redis.get(cacheKey)
+  if (cached) return NextResponse.json(JSON.parse(cached))
+
+  try {
+    const jobs = await scrapeJobs(query, location)
+    // Optional: store jobs in DB for later reference
+    await redis.setex(cacheKey, 3600, JSON.stringify(jobs))
+    return NextResponse.json(jobs)
+  } catch (error) {
+    console.error("Scraping failed:", error)
+    return NextResponse.json({ error: "Failed to fetch jobs" }, { status: 500 })
+  }
+}
+
+==== route.ts ====
+
+import { NextRequest, NextResponse } from "next/server"
+import { adminAuth } from "@/lib/firebase/admin"
+import { prisma } from "@/lib/prisma"
+import { emailQueue } from "@/lib/queue"
+
+export async function POST(req: NextRequest) {
+  const token = req.headers.get("Authorization")?.split(" ")[1]
+  if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  try {
+    const decoded = await adminAuth.verifyIdToken(token)
+    const user = await prisma.user.findUnique({ where: { firebaseUid: decoded.uid } })
+    if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 })
+
+    const { jobId, type, scheduledAt } = await req.json()
+
+    const reminder = await prisma.reminder.create({
+      data: {
+        userId: user.id,
+        jobId,
+        type,
+        scheduledAt: new Date(scheduledAt),
+      },
+    })
+
+    const delay = new Date(scheduledAt).getTime() - Date.now()
+    await emailQueue.add(
+      'send-reminder',
+      {
+        to: user.email,
+        subject: `Reminder: ${type} for job`,
+        body: `Don't forget to ${type} for the job.`,
+      },
+      { delay: delay > 0 ? delay : 0 }
+    )
+
+    return NextResponse.json(reminder)
+  } catch (error) {
+    console.error(error)
+    return NextResponse.json({ error: "Internal error" }, { status: 500 })
+  }
+}
+
+==== route.ts ====
+
+import { NextRequest, NextResponse } from "next/server"
+import { adminAuth } from "@/lib/firebase/admin"
+import { prisma } from "@/lib/prisma"
+import { uploadFileToS3 } from "@/lib/s3"
+import { extractTextFromPDF, extractTextFromDocx } from "@/lib/fileParser"
+import { parseResumeWithGemini } from "@/lib/ai/parseResume"
+import { randomBytes } from "crypto"
+
+export async function POST(req: NextRequest) {
+  const token = req.headers.get("Authorization")?.split(" ")[1]
+  if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  try {
+    const decoded = await adminAuth.verifyIdToken(token)
+    const firebaseUid = decoded.uid
+
+    let user = await prisma.user.findUnique({ where: { firebaseUid } })
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          firebaseUid,
+          email: decoded.email!,
+          name: decoded.name || null,
+          apiKey: randomBytes(32).toString("hex"),
+        },
+      })
+    }
+
+    const formData = await req.formData()
+    const file = formData.get("file") as File
+    if (!file) return NextResponse.json({ error: "No file" }, { status: 400 })
+
+    const buffer = Buffer.from(await file.arrayBuffer())
+    const key = `resumes/${user.id}/${Date.now()}-${file.name}`
+    const url = await uploadFileToS3(buffer, key, file.type)
+
+    let text = ""
+    if (file.type === "application/pdf") {
+      text = await extractTextFromPDF(buffer)
+    } else if (file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+      text = await extractTextFromDocx(buffer)
+    } else {
+      return NextResponse.json({ error: "Unsupported file type" }, { status: 400 })
+    }
+
+    const parsed = await parseResumeWithGemini(text)
+
+    const resume = await prisma.resume.create({
+      data: {
+        userId: user.id,
+        originalUrl: url,
+        parsedData: parsed,
+        isMaster: true,
+      },
+    })
+
+    await prisma.profile.upsert({
+      where: { userId: user.id },
+      update: {
+        skills: parsed.skills || [],
+        experience: parsed.experience || [],
+        education: parsed.education || [],
+      },
+      create: {
+        userId: user.id,
+        skills: parsed.skills || [],
+        experience: parsed.experience || [],
+        education: parsed.education || [],
+      },
+    })
+
+    return NextResponse.json({ resume, profile: parsed })
+  } catch (error) {
+    console.error(error)
+    return NextResponse.json({ error: "Internal error" }, { status: 500 })
+  }
+}
+
+==== route.ts ====
+
+import { NextRequest, NextResponse } from 'next/server'
+import { adminAuth } from '@/lib/firebase/admin'
+import { prisma } from '@/lib/prisma'
+
+export async function GET(req: NextRequest) {
+  const token = req.headers.get('Authorization')?.split(' ')[1]
+  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  try {
+    const decoded = await adminAuth.verifyIdToken(token)
+    const firebaseUid = decoded.uid
+
+    // Upsert user â€“ creates if not exists, otherwise returns existing
+    const user = await prisma.user.upsert({
+      where: { firebaseUid },
+      update: {}, // no updates needed
+      create: {
+        firebaseUid,
+        email: decoded.email!,
+        name: decoded.name,
+      },
+    })
+
+    return NextResponse.json({ apiKey: user.apiKey })
+  } catch (error) {
+    console.error('API key error:', error)
+    return NextResponse.json({ error: 'Invalid token' }, { status: 401 })
+  }
+}
+
+==== route.ts ====
+
+import { NextRequest, NextResponse } from "next/server"
+import { adminAuth } from "@/lib/firebase/admin"
+import { prisma } from "@/lib/prisma"
+
+export async function POST(req: NextRequest) {
+  const token = req.headers.get("Authorization")?.split(" ")[1]
+  if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  try {
+    const decoded = await adminAuth.verifyIdToken(token)
+    const user = await prisma.user.findUnique({ where: { firebaseUid: decoded.uid } })
+    if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 })
+
+    const { name, email, phone, skills, experience, education } = await req.json()
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { name, phone },
+    })
+
+    const profile = await prisma.profile.upsert({
+      where: { userId: user.id },
+      update: { skills, experience, education },
+      create: { userId: user.id, skills, experience, education },
+    })
+
+    return NextResponse.json({ success: true, profile })
+  } catch (error) {
+    console.error(error)
+    return NextResponse.json({ error: "Internal error" }, { status: 500 })
+  }
+}
+
+==== AuthContext.tsx ====
+
+"use client"
+import { createContext, useContext, useEffect, useState } from "react"
+import { User, onIdTokenChanged } from "firebase/auth"
+import { auth } from "@/lib/firebase/client"
+
+interface AuthContextType {
+  user: User | null
+  loading: boolean
+}
+
+const AuthContext = createContext<AuthContextType>({ user: null, loading: true })
+
+export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
+  const [user, setUser] = useState<User | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const unsubscribe = onIdTokenChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        try {
+          const token = await firebaseUser.getIdToken()
+          await fetch('/api/auth/sync', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+          })
+        } catch (e) {
+          console.error('Failed to sync user:', e)
+        }
+      }
+      setUser(firebaseUser)
+      setLoading(false)
+    })
+    return () => unsubscribe()
+  }, [])
+
+  return <AuthContext.Provider value={{ user, loading }}>{children}</AuthContext.Provider>
+}
+
+export const useAuth = () => useContext(AuthContext)
+
+==== page.tsx ====
+
+'use client'
+import { useState } from 'react'
+import { useAuth } from '@/app/contexts/AuthContext' 
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+import { JobCard } from '@/components/JobCard'
+import { searchJobs } from '@/lib/api' 
+
+type Job = {
+  id: string
+  title: string
+  company: string
+  location: string
+  description: string
+}
+
+export default function JobsPage() {
+  const { user } = useAuth()
+  const [query, setQuery] = useState('')
+  const [location, setLocation] = useState('')
+  const [jobs, setJobs] = useState<Job[]>([])
+  const [loading, setLoading] = useState(false)
+
+  const handleSearch = async () => {
+    setLoading(true)
+    try {
+      const data = await searchJobs(query, location)
+      setJobs(data)
+    } catch (error) {
+      console.error(error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="container mx-auto py-8">
+      <h1 className="text-3xl font-bold mb-6 text-secondary">Find Jobs</h1>
+      <div className="flex gap-4 mb-8">
+        <Input
+          placeholder="Job title, keywords"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <Input
+          placeholder="Location"
+          value={location}
+          onChange={(e) => setLocation(e.target.value)}
+        />
+        <Button onClick={handleSearch} disabled={loading}>
+          {loading ? 'Searching...' : 'Search'}
+        </Button>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {jobs.map((job) => (
+          <JobCard key={job.id} job={job} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+==== page.tsx ====
+
+'use client'
+import { useState } from 'react'
+import { useAuth } from '@/app/contexts/AuthContext'
+import { useDropzone } from 'react-dropzone'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+
+type ParsedProfile = {
+  name: string
+  email: string
+  phone: string
+  skills: string[]
+  experience: Array<{ title: string; company: string; startDate: string; endDate: string; description: string }>
+  education: Array<{ degree: string; institution: string; year: string }>
+}
+
+export default function ResumePage() {
+  const { user } = useAuth()
+  const [file, setFile] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [parsed, setParsed] = useState<ParsedProfile | null>(null)
+  const [edited, setEdited] = useState<ParsedProfile | null>(null)
+
+  const { getRootProps, getInputProps } = useDropzone({
+    accept: {
+      'application/pdf': ['.pdf'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+    },
+    maxFiles: 1,
+    onDrop: (acceptedFiles) => {
+      setFile(acceptedFiles[0])
+    },
+  })
+
+  const handleUpload = async () => {
+    if (!file || !user) return
+    setUploading(true)
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const token = await user.getIdToken()
+    const res = await fetch('/api/resume/upload', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    })
+    const data = await res.json()
+    setParsed(data.profile)
+    setEdited(data.profile) // start with parsed data
+    setUploading(false)
+  }
+
+  const handleSave = async () => {
+    if (!edited || !user) return
+    try {
+      const token = await user.getIdToken()
+      const res = await fetch('/api/user/profile', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(edited),
+      })
+      if (!res.ok) throw new Error('Failed to save')
+      alert('Profile saved successfully!')
+    } catch (error) {
+      alert('Failed to save profile. Please try again.')
+    }
+  }
+
+  if (parsed && edited) {
+    return (
+      <div className="max-w-4xl mx-auto">
+        <h1 className="text-3xl font-bold mb-6">Review Your Profile</h1>
+        <Tabs defaultValue="edit">
+          <TabsList className="mb-4">
+            <TabsTrigger value="edit">Edit</TabsTrigger>
+            <TabsTrigger value="preview">Preview</TabsTrigger>
+          </TabsList>
+          <TabsContent value="edit">
+            <Card>
+              <CardHeader>
+                <CardTitle>Edit Profile</CardTitle>
+                <CardDescription>Make changes to the parsed information</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div>
+                  <Label>Name</Label>
+                  <Input value={edited.name} onChange={(e) => setEdited({ ...edited, name: e.target.value })} />
+                </div>
+                <div>
+                  <Label>Email</Label>
+                  <Input value={edited.email} onChange={(e) => setEdited({ ...edited, email: e.target.value })} />
+                </div>
+                <div>
+                  <Label>Phone</Label>
+                  <Input value={edited.phone} onChange={(e) => setEdited({ ...edited, phone: e.target.value })} />
+                </div>
+                <div>
+                  <Label>Skills (comma separated)</Label>
+                  <Input
+                    value={edited.skills.join(', ')}
+                    onChange={(e) => setEdited({ ...edited, skills: e.target.value.split(',').map(s => s.trim()) })}
+                  />
+                </div>
+                <Button onClick={handleSave}>Save Profile</Button>
+              </CardContent>
+            </Card>
+          </TabsContent>
+          <TabsContent value="preview">
+            <Card>
+              <CardHeader>
+                <CardTitle>Profile Preview</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <pre className="bg-muted p-4 rounded">{JSON.stringify(edited, null, 2)}</pre>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
+      </div>
+    )
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto">
+      <h1 className="text-3xl font-bold mb-6">Upload Your Resume</h1>
+      <Card>
+        <CardHeader>
+          <CardTitle>Resume Upload</CardTitle>
+          <CardDescription>We support PDF and DOCX files</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div
+            {...getRootProps()}
+            className="border-2 border-dashed border-border rounded-lg p-12 text-center cursor-pointer hover:border-primary transition"
+          >
+            <input {...getInputProps()} />
+            {file ? (
+              <p>{file.name}</p>
+            ) : (
+              <p>Drag & drop your resume here, or click to select</p>
+            )}
+          </div>
+          {file && (
+            <Button onClick={handleUpload} disabled={uploading} className="mt-4 w-full">
+              {uploading ? 'Processing...' : 'Upload & Parse'}
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+==== page.tsx ====
+
+'use client'
+import { useState, useEffect } from 'react'
+import { useAuth } from '@/app/contexts/AuthContext'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+
+export default function SettingsPage() {
+  const { user } = useAuth()
+  const [apiKey, setApiKey] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    if (user) {
+      user.getIdToken().then((token) => {
+        fetch('/api/user/api-key', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+          .then(res => res.json())
+          .then(data => {
+            setApiKey(data.apiKey || '')
+            setLoading(false)
+          })
+          .catch(() => setLoading(false))
+      })
+    }
+  }, [user])
+
+  const regenerateKey = async () => {
+    // Call an API to regenerate
+    alert('Regenerate not implemented')
+  }
+
+  if (loading) return <div>Loading...</div>
+
+  return (
+    <div className="max-w-2xl mx-auto">
+      <h1 className="text-3xl font-bold mb-6">Settings</h1>
+      <Card>
+        <CardHeader>
+          <CardTitle>API Key</CardTitle>
+          <CardDescription>
+            This key is used by the local bridge server to authenticate with our API.
+            Keep it secret.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center space-x-2">
+            <Input value={apiKey} readOnly className="font-mono" />
+            <Button variant="outline" onClick={() => navigator.clipboard.writeText(apiKey)}>
+              Copy
+            </Button>
+          </div>
+          <Button variant="destructive" onClick={regenerateKey} className="mt-4">
+            Regenerate Key
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+==== layout.tsx ====
+
+'use client'
+import { useAuth } from '../contexts/AuthContext' 
+import { useRouter } from 'next/navigation'
+import { useEffect } from 'react'
+import Link from 'next/link'
+import { Button } from '@/components/ui/button'
+import { auth } from '@/lib/firebase/client'
+import { signOut } from 'firebase/auth'
+
+export default function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  const { user, loading } = useAuth()
+  const router = useRouter()
+
+  useEffect(() => {
+    if (!loading && !user) {
+      router.push('/login')
+    }
+  }, [user, loading, router])
+
+  if (loading) {
+    return <div className="min-h-screen flex items-center justify-center">Loading...</div>
+  }
+
+  if (!user) return null
+
+  const handleSignOut = async () => {
+    await signOut(auth)
+    router.push('/')
+  }
+
+  return (
+    <div className="min-h-screen flex">
+      {/* Sidebar */}
+      <aside className="w-64 bg-card border-r border-border">
+        <div className="p-4">
+          <h2 className="text-xl font-bold text-primary">AutoApply Pro</h2>
+        </div>
+        <nav className="mt-8">
+          <ul className="space-y-2 px-4">
+            <li>
+              <Link href="/dashboard" className="block py-2 px-4 rounded hover:bg-muted">
+                Dashboard
+              </Link>
+            </li>
+            <li>
+              <Link href="/dashboard/resume" className="block py-2 px-4 rounded hover:bg-muted">
+                Resume
+              </Link>
+            </li>
+            <li>
+              <Link href="/dashboard/jobs" className="block py-2 px-4 rounded hover:bg-muted">
+                Jobs
+              </Link>
+            </li>
+            <li>
+              <Link href="/dashboard/applications" className="block py-2 px-4 rounded hover:bg-muted">
+                Applications
+              </Link>
+            </li>
+            <li>
+              <Link href="/dashboard/settings" className="block py-2 px-4 rounded hover:bg-muted">
+                Settings
+              </Link>
+            </li>
+          </ul>
+        </nav>
+        <div className="absolute bottom-4 left-4">
+          <Button variant="outline" onClick={handleSignOut}>
+            Sign Out
+          </Button>
+        </div>
+      </aside>
+
+      {/* Main content */}
+      <main className="flex-1 p-8 bg-muted/20">
+        {children}
+      </main>
+    </div>
+  )
+}
+
+==== page.tsx ====
+
+'use client'
+import { useAuth } from '../contexts/AuthContext'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+
+export default function DashboardHome() {
+  const { user } = useAuth()
+
+  return (
+    <div>
+      <h1 className="text-3xl font-bold mb-6">Welcome, {user?.displayName || 'User'}</h1>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>Resume Status</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-semibold">Not uploaded</p>
+            <p className="text-sm text-muted-foreground mt-2">Upload your resume to get started</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Applications</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-semibold">0</p>
+            <p className="text-sm text-muted-foreground mt-2">Applied jobs</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>API Key</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm font-mono truncate">â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢</p>
+            <p className="text-sm text-muted-foreground mt-2">Used for local bridge server</p>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  )
+}
+
+==== page.tsx ====
+
+'use client'
+import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth'
+import { auth } from '@/lib/firebase/client'
+import { useRouter } from 'next/navigation'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+
+export default function LoginPage() {
+  const router = useRouter()
+
+  const signInWithGoogle = async () => {
+    try {
+      const provider = new GoogleAuthProvider()
+      await signInWithPopup(auth, provider)
+      router.push('/dashboard')
+    } catch (error) {
+      console.error('Login failed:', error)
+    }
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-muted">
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle className="text-2xl text-center">Welcome to AutoApply Pro</CardTitle>
+          <CardDescription className="text-center">
+            Sign in to start automating your job applications
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={signInWithGoogle} className="w-full" size="lg">
+            <svg className="mr-2 h-4 w-4" viewBox="0 0 24 24">
+              <path
+                d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                fill="#4285F4"
+              />
+              <path
+                d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                fill="#34A853"
+              />
+              <path
+                d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                fill="#FBBC05"
+              />
+              <path
+                d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                fill="#EA4335"
+              />
+            </svg>
+            Sign in with Google
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+==== layout.tsx ====
+
+import type { Metadata } from "next"
+import { Geist, Geist_Mono } from "next/font/google"
+import "./globals.css"
+import { AuthProvider } from "./contexts/AuthContext"
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+})
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+})
+
+export const metadata: Metadata = {
+  title: "AutoApply Jobs",
+  description: "One click and get the job",
+}
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode
+}>) {
+  return (
+    <html lang="en">
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+        <AuthProvider>{children}</AuthProvider>
+      </body>
+    </html>
+  )
+}
+
+==== page.tsx ====
+
+import Link from 'next/link'
+import { Button } from '@/components/ui/button'
+
+export default function Home() {
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-muted to-background">
+      <div className="container mx-auto px-4 py-16">
+        <header className="flex justify-between items-center mb-16">
+          <h1 className="text-2xl font-bold text-primary">AutoApply Pro</h1>
+          <Link href="/login">
+            <Button>Get Started</Button>
+          </Link>
+        </header>
+
+        <main className="text-center">
+          <h2 className="text-5xl font-extrabold text-secondary mb-4">
+            Automate Your Job Applications
+          </h2>
+          <p className="text-xl text-muted-foreground mb-8 max-w-2xl mx-auto">
+            Upload your resume once. We tailor it to every job, write cover letters,
+            and even fill out forms â€“ all with one click.
+          </p>
+          <Link href="/login">
+            <Button size="lg" className="text-lg px-8">
+              Start Automating
+            </Button>
+          </Link>
+
+          <div className="mt-20 grid grid-cols-1 md:grid-cols-3 gap-8">
+            <div className="p-6 bg-card rounded-lg shadow">
+              <h3 className="text-xl font-semibold mb-2">ðŸ“„ Smart Resume Parsing</h3>
+              <p className="text-muted-foreground">
+                AI extracts your skills, experience, and education automatically.
+              </p>
+            </div>
+            <div className="p-6 bg-card rounded-lg shadow">
+              <h3 className="text-xl font-semibold mb-2">ðŸ” Job Search</h3>
+              <p className="text-muted-foreground">
+                Find relevant jobs from multiple sources, all in one place.
+              </p>
+            </div>
+            <div className="p-6 bg-card rounded-lg shadow">
+              <h3 className="text-xl font-semibold mb-2">âš¡ Oneâ€‘Click Apply</h3>
+              <p className="text-muted-foreground">
+                Let Accomplish fill out forms and submit your application.
+              </p>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  )
+}
+
+==== button.tsx ====
+
+import * as React from "react"
+import { Slot } from "@radix-ui/react-slot"
+import { cva, type VariantProps } from "class-variance-authority"
+
+import { cn } from "@/lib/utils"
+
+const buttonVariants = cva(
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  {
+    variants: {
+      variant: {
+        default:
+          "bg-primary text-primary-foreground shadow hover:bg-primary/90",
+        destructive:
+          "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
+        outline:
+          "border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground",
+        secondary:
+          "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
+        ghost: "hover:bg-accent hover:text-accent-foreground",
+        link: "text-primary underline-offset-4 hover:underline",
+      },
+      size: {
+        default: "h-9 px-4 py-2",
+        sm: "h-8 rounded-md px-3 text-xs",
+        lg: "h-10 rounded-md px-8",
+        icon: "h-9 w-9",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+)
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean
+}
+
+const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : "button"
+    return (
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    )
+  }
+)
+Button.displayName = "Button"
+
+export { Button, buttonVariants }
+
+==== card.tsx ====
+
+import * as React from "react"
+
+import { cn } from "@/lib/utils"
+
+const Card = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn(
+      "rounded-xl border bg-card text-card-foreground shadow",
+      className
+    )}
+    {...props}
+  />
+))
+Card.displayName = "Card"
+
+const CardHeader = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("flex flex-col space-y-1.5 p-6", className)}
+    {...props}
+  />
+))
+CardHeader.displayName = "CardHeader"
+
+const CardTitle = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("font-semibold leading-none tracking-tight", className)}
+    {...props}
+  />
+))
+CardTitle.displayName = "CardTitle"
+
+const CardDescription = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("text-sm text-muted-foreground", className)}
+    {...props}
+  />
+))
+CardDescription.displayName = "CardDescription"
+
+const CardContent = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div ref={ref} className={cn("p-6 pt-0", className)} {...props} />
+))
+CardContent.displayName = "CardContent"
+
+const CardFooter = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("flex items-center p-6 pt-0", className)}
+    {...props}
+  />
+))
+CardFooter.displayName = "CardFooter"
+
+export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent }
+
+==== dialog.tsx ====
+
+"use client"
+
+import * as React from "react"
+import * as DialogPrimitive from "@radix-ui/react-dialog"
+import { X } from "lucide-react"
+
+import { cn } from "@/lib/utils"
+
+const Dialog = DialogPrimitive.Root
+
+const DialogTrigger = DialogPrimitive.Trigger
+
+const DialogPortal = DialogPrimitive.Portal
+
+const DialogClose = DialogPrimitive.Close
+
+const DialogOverlay = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Overlay>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay
+    ref={ref}
+    className={cn(
+      "fixed inset-0 z-50 bg-black/80  data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      className
+    )}
+    {...props}
+  />
+))
+DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
+
+const DialogContent = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
+>(({ className, children, ...props }, ref) => (
+  <DialogPortal>
+    <DialogOverlay />
+    <DialogPrimitive.Content
+      ref={ref}
+      className={cn(
+        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
+        className
+      )}
+      {...props}
+    >
+      {children}
+      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+        <X className="h-4 w-4" />
+        <span className="sr-only">Close</span>
+      </DialogPrimitive.Close>
+    </DialogPrimitive.Content>
+  </DialogPortal>
+))
+DialogContent.displayName = DialogPrimitive.Content.displayName
+
+const DialogHeader = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) => (
+  <div
+    className={cn(
+      "flex flex-col space-y-1.5 text-center sm:text-left",
+      className
+    )}
+    {...props}
+  />
+)
+DialogHeader.displayName = "DialogHeader"
+
+const DialogFooter = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) => (
+  <div
+    className={cn(
+      "flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2",
+      className
+    )}
+    {...props}
+  />
+)
+DialogFooter.displayName = "DialogFooter"
+
+const DialogTitle = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Title>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Title
+    ref={ref}
+    className={cn(
+      "text-lg font-semibold leading-none tracking-tight",
+      className
+    )}
+    {...props}
+  />
+))
+DialogTitle.displayName = DialogPrimitive.Title.displayName
+
+const DialogDescription = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Description>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Description
+    ref={ref}
+    className={cn("text-sm text-muted-foreground", className)}
+    {...props}
+  />
+))
+DialogDescription.displayName = DialogPrimitive.Description.displayName
+
+export {
+  Dialog,
+  DialogPortal,
+  DialogOverlay,
+  DialogTrigger,
+  DialogClose,
+  DialogContent,
+  DialogHeader,
+  DialogFooter,
+  DialogTitle,
+  DialogDescription,
+}
+
+==== dropdown-menu.tsx ====
+
+"use client"
+
+import * as React from "react"
+import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu"
+import { Check, ChevronRight, Circle } from "lucide-react"
+
+import { cn } from "@/lib/utils"
+
+const DropdownMenu = DropdownMenuPrimitive.Root
+
+const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger
+
+const DropdownMenuGroup = DropdownMenuPrimitive.Group
+
+const DropdownMenuPortal = DropdownMenuPrimitive.Portal
+
+const DropdownMenuSub = DropdownMenuPrimitive.Sub
+
+const DropdownMenuRadioGroup = DropdownMenuPrimitive.RadioGroup
+
+const DropdownMenuSubTrigger = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.SubTrigger>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubTrigger> & {
+    inset?: boolean
+  }
+>(({ className, inset, children, ...props }, ref) => (
+  <DropdownMenuPrimitive.SubTrigger
+    ref={ref}
+    className={cn(
+      "flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none focus:bg-accent data-[state=open]:bg-accent [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+      inset && "pl-8",
+      className
+    )}
+    {...props}
+  >
+    {children}
+    <ChevronRight className="ml-auto" />
+  </DropdownMenuPrimitive.SubTrigger>
+))
+DropdownMenuSubTrigger.displayName =
+  DropdownMenuPrimitive.SubTrigger.displayName
+
+const DropdownMenuSubContent = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.SubContent>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubContent>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.SubContent
+    ref={ref}
+    className={cn(
+      "z-50 min-w-[8rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-lg data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 origin-[--radix-dropdown-menu-content-transform-origin]",
+      className
+    )}
+    {...props}
+  />
+))
+DropdownMenuSubContent.displayName =
+  DropdownMenuPrimitive.SubContent.displayName
+
+const DropdownMenuContent = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
+>(({ className, sideOffset = 4, ...props }, ref) => (
+  <DropdownMenuPrimitive.Portal>
+    <DropdownMenuPrimitive.Content
+      ref={ref}
+      sideOffset={sideOffset}
+      className={cn(
+        "z-50 max-h-[var(--radix-dropdown-menu-content-available-height)] min-w-[8rem] overflow-y-auto overflow-x-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md",
+        "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 origin-[--radix-dropdown-menu-content-transform-origin]",
+        className
+      )}
+      {...props}
+    />
+  </DropdownMenuPrimitive.Portal>
+))
+DropdownMenuContent.displayName = DropdownMenuPrimitive.Content.displayName
+
+const DropdownMenuItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Item>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item> & {
+    inset?: boolean
+  }
+>(({ className, inset, ...props }, ref) => (
+  <DropdownMenuPrimitive.Item
+    ref={ref}
+    className={cn(
+      "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&>svg]:size-4 [&>svg]:shrink-0",
+      inset && "pl-8",
+      className
+    )}
+    {...props}
+  />
+))
+DropdownMenuItem.displayName = DropdownMenuPrimitive.Item.displayName
+
+const DropdownMenuCheckboxItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.CheckboxItem>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.CheckboxItem>
+>(({ className, children, checked, ...props }, ref) => (
+  <DropdownMenuPrimitive.CheckboxItem
+    ref={ref}
+    className={cn(
+      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      className
+    )}
+    checked={checked}
+    {...props}
+  >
+    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+      <DropdownMenuPrimitive.ItemIndicator>
+        <Check className="h-4 w-4" />
+      </DropdownMenuPrimitive.ItemIndicator>
+    </span>
+    {children}
+  </DropdownMenuPrimitive.CheckboxItem>
+))
+DropdownMenuCheckboxItem.displayName =
+  DropdownMenuPrimitive.CheckboxItem.displayName
+
+const DropdownMenuRadioItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.RadioItem>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.RadioItem>
+>(({ className, children, ...props }, ref) => (
+  <DropdownMenuPrimitive.RadioItem
+    ref={ref}
+    className={cn(
+      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      className
+    )}
+    {...props}
+  >
+    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+      <DropdownMenuPrimitive.ItemIndicator>
+        <Circle className="h-2 w-2 fill-current" />
+      </DropdownMenuPrimitive.ItemIndicator>
+    </span>
+    {children}
+  </DropdownMenuPrimitive.RadioItem>
+))
+DropdownMenuRadioItem.displayName = DropdownMenuPrimitive.RadioItem.displayName
+
+const DropdownMenuLabel = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Label>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Label> & {
+    inset?: boolean
+  }
+>(({ className, inset, ...props }, ref) => (
+  <DropdownMenuPrimitive.Label
+    ref={ref}
+    className={cn(
+      "px-2 py-1.5 text-sm font-semibold",
+      inset && "pl-8",
+      className
+    )}
+    {...props}
+  />
+))
+DropdownMenuLabel.displayName = DropdownMenuPrimitive.Label.displayName
+
+const DropdownMenuSeparator = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Separator>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Separator>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.Separator
+    ref={ref}
+    className={cn("-mx-1 my-1 h-px bg-muted", className)}
+    {...props}
+  />
+))
+DropdownMenuSeparator.displayName = DropdownMenuPrimitive.Separator.displayName
+
+const DropdownMenuShortcut = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLSpanElement>) => {
+  return (
+    <span
+      className={cn("ml-auto text-xs tracking-widest opacity-60", className)}
+      {...props}
+    />
+  )
+}
+DropdownMenuShortcut.displayName = "DropdownMenuShortcut"
+
+export {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuCheckboxItem,
+  DropdownMenuRadioItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuGroup,
+  DropdownMenuPortal,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuRadioGroup,
+}
+
+==== form.tsx ====
+
+"use client"
+
+import * as React from "react"
+import * as LabelPrimitive from "@radix-ui/react-label"
+import { Slot } from "@radix-ui/react-slot"
+import {
+  Controller,
+  FormProvider,
+  useFormContext,
+  type ControllerProps,
+  type FieldPath,
+  type FieldValues,
+} from "react-hook-form"
+
+import { cn } from "@/lib/utils"
+import { Label } from "@/components/ui/label"
+
+const Form = FormProvider
+
+type FormFieldContextValue<
+  TFieldValues extends FieldValues = FieldValues,
+  TName extends FieldPath<TFieldValues> = FieldPath<TFieldValues>
+> = {
+  name: TName
+}
+
+const FormFieldContext = React.createContext<FormFieldContextValue | null>(null)
+
+const FormField = <
+  TFieldValues extends FieldValues = FieldValues,
+  TName extends FieldPath<TFieldValues> = FieldPath<TFieldValues>
+>({
+  ...props
+}: ControllerProps<TFieldValues, TName>) => {
+  return (
+    <FormFieldContext.Provider value={{ name: props.name }}>
+      <Controller {...props} />
+    </FormFieldContext.Provider>
+  )
+}
+
+const useFormField = () => {
+  const fieldContext = React.useContext(FormFieldContext)
+  const itemContext = React.useContext(FormItemContext)
+  const { getFieldState, formState } = useFormContext()
+
+  if (!fieldContext) {
+    throw new Error("useFormField should be used within <FormField>")
+  }
+
+  if (!itemContext) {
+    throw new Error("useFormField should be used within <FormItem>")
+  }
+
+  const fieldState = getFieldState(fieldContext.name, formState)
+
+  const { id } = itemContext
+
+  return {
+    id,
+    name: fieldContext.name,
+    formItemId: `${id}-form-item`,
+    formDescriptionId: `${id}-form-item-description`,
+    formMessageId: `${id}-form-item-message`,
+    ...fieldState,
+  }
+}
+
+type FormItemContextValue = {
+  id: string
+}
+
+const FormItemContext = React.createContext<FormItemContextValue | null>(null)
+
+const FormItem = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => {
+  const id = React.useId()
+
+  return (
+    <FormItemContext.Provider value={{ id }}>
+      <div ref={ref} className={cn("space-y-2", className)} {...props} />
+    </FormItemContext.Provider>
+  )
+})
+FormItem.displayName = "FormItem"
+
+const FormLabel = React.forwardRef<
+  React.ElementRef<typeof LabelPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof LabelPrimitive.Root>
+>(({ className, ...props }, ref) => {
+  const { error, formItemId } = useFormField()
+
+  return (
+    <Label
+      ref={ref}
+      className={cn(error && "text-destructive", className)}
+      htmlFor={formItemId}
+      {...props}
+    />
+  )
+})
+FormLabel.displayName = "FormLabel"
+
+const FormControl = React.forwardRef<
+  React.ElementRef<typeof Slot>,
+  React.ComponentPropsWithoutRef<typeof Slot>
+>(({ ...props }, ref) => {
+  const { error, formItemId, formDescriptionId, formMessageId } = useFormField()
+
+  return (
+    <Slot
+      ref={ref}
+      id={formItemId}
+      aria-describedby={
+        !error
+          ? `${formDescriptionId}`
+          : `${formDescriptionId} ${formMessageId}`
+      }
+      aria-invalid={!!error}
+      {...props}
+    />
+  )
+})
+FormControl.displayName = "FormControl"
+
+const FormDescription = React.forwardRef<
+  HTMLParagraphElement,
+  React.HTMLAttributes<HTMLParagraphElement>
+>(({ className, ...props }, ref) => {
+  const { formDescriptionId } = useFormField()
+
+  return (
+    <p
+      ref={ref}
+      id={formDescriptionId}
+      className={cn("text-[0.8rem] text-muted-foreground", className)}
+      {...props}
+    />
+  )
+})
+FormDescription.displayName = "FormDescription"
+
+const FormMessage = React.forwardRef<
+  HTMLParagraphElement,
+  React.HTMLAttributes<HTMLParagraphElement>
+>(({ className, children, ...props }, ref) => {
+  const { error, formMessageId } = useFormField()
+  const body = error ? String(error?.message ?? "") : children
+
+  if (!body) {
+    return null
+  }
+
+  return (
+    <p
+      ref={ref}
+      id={formMessageId}
+      className={cn("text-[0.8rem] font-medium text-destructive", className)}
+      {...props}
+    >
+      {body}
+    </p>
+  )
+})
+FormMessage.displayName = "FormMessage"
+
+export {
+  useFormField,
+  Form,
+  FormItem,
+  FormLabel,
+  FormControl,
+  FormDescription,
+  FormMessage,
+  FormField,
+}
+
+==== input.tsx ====
+
+import * as React from "react"
+
+import { cn } from "@/lib/utils"
+
+const Input = React.forwardRef<HTMLInputElement, React.ComponentProps<"input">>(
+  ({ className, type, ...props }, ref) => {
+    return (
+      <input
+        type={type}
+        className={cn(
+          "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 md:text-sm",
+          className
+        )}
+        ref={ref}
+        {...props}
+      />
+    )
+  }
+)
+Input.displayName = "Input"
+
+export { Input }
+
+==== label.tsx ====
+
+"use client"
+
+import * as React from "react"
+import * as LabelPrimitive from "@radix-ui/react-label"
+import { cva, type VariantProps } from "class-variance-authority"
+
+import { cn } from "@/lib/utils"
+
+const labelVariants = cva(
+  "text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+)
+
+const Label = React.forwardRef<
+  React.ElementRef<typeof LabelPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof LabelPrimitive.Root> &
+    VariantProps<typeof labelVariants>
+>(({ className, ...props }, ref) => (
+  <LabelPrimitive.Root
+    ref={ref}
+    className={cn(labelVariants(), className)}
+    {...props}
+  />
+))
+Label.displayName = LabelPrimitive.Root.displayName
+
+export { Label }
+
+==== tabs.tsx ====
+
+"use client"
+
+import * as React from "react"
+import * as TabsPrimitive from "@radix-ui/react-tabs"
+
+import { cn } from "@/lib/utils"
+
+const Tabs = TabsPrimitive.Root
+
+const TabsList = React.forwardRef<
+  React.ElementRef<typeof TabsPrimitive.List>,
+  React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>
+>(({ className, ...props }, ref) => (
+  <TabsPrimitive.List
+    ref={ref}
+    className={cn(
+      "inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground",
+      className
+    )}
+    {...props}
+  />
+))
+TabsList.displayName = TabsPrimitive.List.displayName
+
+const TabsTrigger = React.forwardRef<
+  React.ElementRef<typeof TabsPrimitive.Trigger>,
+  React.ComponentPropsWithoutRef<typeof TabsPrimitive.Trigger>
+>(({ className, ...props }, ref) => (
+  <TabsPrimitive.Trigger
+    ref={ref}
+    className={cn(
+      "inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow",
+      className
+    )}
+    {...props}
+  />
+))
+TabsTrigger.displayName = TabsPrimitive.Trigger.displayName
+
+const TabsContent = React.forwardRef<
+  React.ElementRef<typeof TabsPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof TabsPrimitive.Content>
+>(({ className, ...props }, ref) => (
+  <TabsPrimitive.Content
+    ref={ref}
+    className={cn(
+      "mt-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+      className
+    )}
+    {...props}
+  />
+))
+TabsContent.displayName = TabsPrimitive.Content.displayName
+
+export { Tabs, TabsList, TabsTrigger, TabsContent }
+
+==== textarea.tsx ====
+
+import * as React from "react"
+
+import { cn } from "@/lib/utils"
+
+const Textarea = React.forwardRef<
+  HTMLTextAreaElement,
+  React.ComponentProps<"textarea">
+>(({ className, ...props }, ref) => {
+  return (
+    <textarea
+      className={cn(
+        "flex min-h-[60px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 md:text-sm",
+        className
+      )}
+      ref={ref}
+      {...props}
+    />
+  )
+})
+Textarea.displayName = "Textarea"
+
+export { Textarea }
+
+==== toggle.tsx ====
+
+"use client"
+
+import * as React from "react"
+import * as TogglePrimitive from "@radix-ui/react-toggle"
+import { cva, type VariantProps } from "class-variance-authority"
+
+import { cn } from "@/lib/utils"
+
+const toggleVariants = cva(
+  "inline-flex items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors hover:bg-muted hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=on]:bg-accent data-[state=on]:text-accent-foreground [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  {
+    variants: {
+      variant: {
+        default: "bg-transparent",
+        outline:
+          "border border-input bg-transparent shadow-sm hover:bg-accent hover:text-accent-foreground",
+      },
+      size: {
+        default: "h-9 px-2 min-w-9",
+        sm: "h-8 px-1.5 min-w-8",
+        lg: "h-10 px-2.5 min-w-10",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+)
+
+const Toggle = React.forwardRef<
+  React.ElementRef<typeof TogglePrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof TogglePrimitive.Root> &
+    VariantProps<typeof toggleVariants>
+>(({ className, variant, size, ...props }, ref) => (
+  <TogglePrimitive.Root
+    ref={ref}
+    className={cn(toggleVariants({ variant, size, className }))}
+    {...props}
+  />
+))
+
+Toggle.displayName = TogglePrimitive.Root.displayName
+
+export { Toggle, toggleVariants }
+
+==== JobCard.tsx ====
+
+'use client'
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { useAuth } from '@/app/contexts/AuthContext'
+import { useState } from 'react'
+
+interface JobCardProps {
+  job: {
+    id: string
+    title: string
+    company: string
+    location: string
+    description: string
+  }
+}
+
+export function JobCard({ job }: JobCardProps) {
+  const { user } = useAuth()
+  const [applying, setApplying] = useState(false)
+
+ const handleApply = async () => {
+  if (!user) return
+  setApplying(true)
+  try {
+    const token = await user.getIdToken()
+    const apiKeyRes = await fetch('/api/user/api-key', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    const { apiKey } = await apiKeyRes.json()
+
+    const res = await fetch('http://localhost:3001/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId: job.id, apiKey }),
+    })
+    if (!res.ok) throw new Error('Failed to start automation')
+    alert('Automation started! Check your Accomplish app.')
+  } catch (error) {
+    alert('Could not connect to local bridge server. Make sure it is running.')
+  } finally {
+    setApplying(false)
+  }
+}
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{job.title}</CardTitle>
+        <p className="text-sm text-muted-foreground">{job.company} â€¢ {job.location}</p>
+      </CardHeader>
+      <CardContent>
+        <p className="line-clamp-3">{job.description}</p>
+      </CardContent>
+      <CardFooter>
+        <Button onClick={handleApply} disabled={applying} className="w-full">
+          {applying ? 'Starting...' : 'Apply with Accomplish'}
+        </Button>
+      </CardFooter>
+    </Card>
+  )
+}
+
+==== gemini.ts ====
+
+import { GoogleGenerativeAI } from "@google/generative-ai"
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
+
+export async function callGemini(prompt: string, responseMimeType?: "application/json") {
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.5-flash",
+    generationConfig: responseMimeType ? { responseMimeType } : undefined,
+  })
+  const result = await model.generateContent(prompt)
+  return result.response.text()
+}
+
+==== parseResume.ts ====
+
+import { callGemini } from "./gemini"
+
+export async function parseResumeWithGemini(text: string) {
+  const prompt = `
+You are an expert resume parser. Extract the following information from the resume text and return a JSON object with exactly these fields:
+- name: full name of the candidate
+- email: email address
+- phone: phone number (if available)
+- skills: array of strings (technical and soft skills)
+- experience: array of objects, each with { title, company, startDate, endDate, description }
+- education: array of objects, each with { degree, institution, year }
+
+Resume text:
+${text}
+  `
+  const response = await callGemini(prompt, "application/json")
+  return JSON.parse(response)
+}
+
+==== admin.ts ====
+
+import { getApps, initializeApp, cert } from "firebase-admin/app"
+import { getAuth } from "firebase-admin/auth"
+
+const serviceAccount = {
+  projectId: process.env.FIREBASE_PROJECT_ID,
+  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+  privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+}
+
+const app = getApps().length === 0
+  ? initializeApp({ credential: cert(serviceAccount) })
+  : getApps()[0]
+
+export const adminAuth = getAuth(app)
+
+==== client.ts ====
+
+import { initializeApp, getApps } from "firebase/app"
+import { getAuth } from "firebase/auth"
+import { getAnalytics, isSupported, type Analytics } from "firebase/analytics"
+
+const firebaseConfig = {
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
+}
+
+if (!process.env.NEXT_PUBLIC_FIREBASE_API_KEY) {
+  throw new Error('Missing NEXT_PUBLIC_FIREBASE_API_KEY in .env')
+}
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0]
+export const auth = getAuth(app)
+
+export let analytics: Analytics | undefined
+if (typeof window !== "undefined") {
+  isSupported().then((yes) => {
+    if (yes) analytics = getAnalytics(app)
+  })
+}
+
+==== jobs.ts ====
+
+import puppeteer from 'puppeteer-extra'
+import StealthPlugin from 'puppeteer-extra-plugin-stealth'
+
+puppeteer.use(StealthPlugin())
+
+export async function scrapeJobs(query: string, location: string) {
+  const browser = await puppeteer.launch({ headless: true })
+  const page = await browser.newPage()
+
+  const url = `https://www.indeed.com/jobs?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location)}`
+  await page.goto(url, { waitUntil: 'networkidle2' })
+
+  const jobs = await page.evaluate(() => {
+    const items = document.querySelectorAll('.jobsearch-ResultsList > li')
+    return Array.from(items).map((el) => {
+      const titleEl = el.querySelector('h2 a')
+      const companyEl = el.querySelector('.companyName')
+      const locationEl = el.querySelector('.companyLocation')
+      const descEl = el.querySelector('.job-snippet')
+      return {
+        title: titleEl?.textContent?.trim() || '',
+        company: companyEl?.textContent?.trim() || '',
+        location: locationEl?.textContent?.trim() || '',
+        description: descEl?.textContent?.trim() || '',
+        url: titleEl?.getAttribute('href') ? 'https://www.indeed.com' + titleEl.getAttribute('href') : '',
+      }
+    }).filter(job => job.title)
+  })
+
+  await browser.close()
+  return jobs
+}
+
+==== api.ts ====
+
+export async function searchJobs(query: string, location: string) {
+  const res = await fetch(`/api/jobs/search?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location)}`)
+  if (!res.ok) throw new Error('Failed to fetch jobs')
+  return res.json()
+}
+
+==== email.ts ====
+
+import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses"
+
+const ses = new SESClient({ region: process.env.AWS_REGION })
+
+export async function sendEmail(to: string, subject: string, body: string) {
+  const command = new SendEmailCommand({
+    Source: process.env.EMAIL_FROM!,
+    Destination: { ToAddresses: [to] },
+    Message: {
+      Subject: { Data: subject },
+      Body: { Html: { Data: body } },
+    },
+  })
+  await ses.send(command)
+}   
+
+==== fileParser.ts ====
+
+import mammoth from 'mammoth'
+
+export async function extractTextFromPDF(buffer: Buffer): Promise<string> {
+  const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  
+  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) })
+  const pdf = await loadingTask.promise
+  
+  let fullText = ''
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i)
+    const content = await page.getTextContent()
+    const strings = content.items.map((item: any) => ('str' in item ? item.str : ''))
+    fullText += strings.join(' ') + '\n'
+  }
+  
+  return fullText
+}
+
+export async function extractTextFromDocx(buffer: Buffer): Promise<string> {
+  const result = await mammoth.extractRawText({ buffer })
+  return result.value
+}
+
+==== prisma.ts ====
+
+import { PrismaClient } from '@prisma/client'
+import { PrismaPg } from '@prisma/adapter-pg'
+
+const globalForPrisma = globalThis as unknown as { prisma: PrismaClient }
+
+function createPrismaClient() {
+  const adapter = new PrismaPg({
+    connectionString: process.env.DATABASE_URL!,
+  })
+  return new PrismaClient({ adapter })
+}
+
+export const prisma = globalForPrisma.prisma || createPrismaClient()
+
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
+
+==== queue.ts ====
+
+import { Queue, Worker, Job } from 'bullmq'
+import { redis } from './redis'
+import { sendEmail } from './email'
+
+// Cast redis as any to satisfy BullMQ's type expectations
+export const emailQueue = new Queue('email', { connection: redis as any })
+
+export const startWorker = () => {
+  new Worker('email', async (job: Job) => {
+    const { to, subject, body } = job.data
+    await sendEmail(to, subject, body)
+  }, { connection: redis as any })
+}
+
+==== redis.ts ====
+
+import Redis from "ioredis"
+
+if (!process.env.REDIS_URL) {
+  throw new Error("REDIS_URL is not defined")
+}
+
+export const redis = new Redis(process.env.REDIS_URL)
+
+redis.on("connect", () => console.log("Redis connected"))
+redis.on("error", (err) => console.error("Redis error:", err))
+
+==== s3.ts ====
+
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3"
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
+
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION!,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+  },
+})
+
+export const uploadFileToS3 = async (file: Buffer, key: string, contentType: string) => {
+  const command = new PutObjectCommand({
+    Bucket: process.env.AWS_S3_BUCKET!,
+    Key: key,
+    Body: file,
+    ContentType: contentType,
+  })
+  await s3Client.send(command)
+  return `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`
+}
+
+==== utils.ts ====
+
+import { clsx, type ClassValue } from "clsx"
+import { twMerge } from "tailwind-merge"
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+==== next-env.d.ts ====
+
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+import "./.next/dev/types/routes.d.ts";
+
+// NOTE: This file should not be edited
+// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.
+
+==== next.config.ts ====
+
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  /* config options here */
+  serverExternalPackages: ['pdfjs-dist'],
+};
+
+export default nextConfig;
+
+==== prisma.config.ts ====
+
+import { defineConfig } from 'prisma/config'
+import 'dotenv/config'
+
+export default defineConfig({
+  datasource: {
+    url: process.env.DATABASE_URL!,
+  },
+  migrations: {
+    path: 'prisma/migrations',
+  },
+})
